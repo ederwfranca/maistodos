@@ -1,0 +1,72 @@
+stages:
+  - quality
+  - build
+  - deploy
+
+variables:
+  GIT_DEPTH: "0"
+  DOCKER_HOST: tcp://docker:2375
+
+sonar-check:
+  stage: quality
+  image: sonarsource/sonar-scanner-cli:latest
+  script:
+    - sonar-scanner -Dsonar.projectKey=hep-back
+  only:
+    - main
+    - develop
+    - merge_requests
+
+test:
+  stage: quality
+  image: node:latest
+  coverage: /All files[^|]*\|[^|]*\s+([\d\.]+)/
+  before_script:
+    - npm install
+  script:
+    - npm run test:cov
+  artifacts:
+    reports:
+      junit:
+        - junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: ./coverage/cobertura-coverage.xml
+
+build-code:
+  stage: build
+  image: node:latest
+  script:
+    - mv .env.$CI_COMMIT_REF_NAME .env
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - "dist/"
+  only:
+    - main
+
+deploy:
+  stage: deploy
+  image:
+    name: amazon/aws-cli
+    entrypoint: [""]
+  services:
+    - docker:dind
+  before_script:
+    - amazon-linux-extras install docker
+    - aws --version
+    - docker --version
+    - yum update -y && yum install -y gettext
+  script:
+    - docker build -t $DOCKER_REGISTRY/$APP_NAME:$CI_PIPELINE_IID .
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set default.region $AWS_DEFAULT_REGION
+    - aws ecr get-login-password | docker login --username AWS --password-stdin $DOCKER_REGISTRY
+    - docker push $DOCKER_REGISTRY/$APP_NAME:$CI_PIPELINE_IID
+    - envsubst < devops/app-runner-$CI_COMMIT_REF_NAME.json > app-runner-config.json
+    - aws apprunner update-service --cli-input-json file://app-runner-config.json
+
+  only:
+    - main
